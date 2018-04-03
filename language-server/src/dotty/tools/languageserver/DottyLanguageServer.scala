@@ -271,7 +271,7 @@ class DottyLanguageServer extends LanguageServer
               Nil
           }
 
-          importedSyms.flatMap { sym =>
+          importedSyms.filter(_.exists).flatMap { sym =>
             val trees = driver.allTreesContaining(sym.name.sourceModuleName.toString)
             val defSymbol = if (sym is Flags.ModuleVal) sym.moduleClass else sym
             Interactive.namedTrees(trees, Include.overriding, defSymbol)
