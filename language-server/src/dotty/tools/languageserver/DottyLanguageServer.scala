@@ -280,12 +280,11 @@ class DottyLanguageServer extends LanguageServer
         case _ =>
           sym.topLevelClass match {
             case cls: ClassSymbol =>
-              val trees = SourceTree.fromSymbol(cls.toList)
+              val trees = SourceTree.fromSymbol(cls)
               Interactive.namedTrees(trees, Include.overriding, sym)
             case _ =>
               Nil
           }
-
       }
     defs.map(d => location(d.namePos)).asJava
   }

@@ -9,10 +9,24 @@ import core._, core.Decorators.{sourcePos => _, _}
 import Contexts._, NameOps._, Symbols._, StdNames._
 import util._, util.Positions._
 
-/** A typechecked named `tree` coming from `source` */
-case class SourceTree(topLevelImports: List[tpd.Import], tree: tpd.NameTree, source: SourceFile) {
+/** A `tree` coming from `source` */
+sealed trait SourceTree {
+
+  /** The underlying tree. */
+  def tree: tpd.Tree
+
+  /** The source from which `tree` comes. */
+  def source: SourceFile
+
   /** The position of `tree` */
-  def pos(implicit ctx: Context): SourcePosition = source.atPos(tree.pos)
+  final def pos(implicit ctx: Context): SourcePosition = source.atPos(tree.pos)
+}
+
+/** An import coming from `source` */
+case class SourceImportTree(tree: tpd.Import, source: SourceFile) extends SourceTree
+
+/** A typechecked `tree` coming from `source` */
+case class SourceNamedTree(tree: tpd.NameTree, source: SourceFile) extends SourceTree {
 
   /** The position of the name in `tree` */
   def namePos(implicit ctx: Context): SourcePosition = {
@@ -39,22 +53,34 @@ case class SourceTree(topLevelImports: List[tpd.Import], tree: tpd.NameTree, sou
 }
 
 object SourceTree {
-  def fromSymbol(sym: ClassSymbol, id: String = "")(implicit ctx: Context): Option[SourceTree] = {
+  def fromSymbol(sym: ClassSymbol, id: String = "")(implicit ctx: Context): List[SourceTree] = {
     if (sym == defn.SourceFileAnnot || // FIXME: No SourceFile annotation on SourceFile itself
         sym.sourceFile == null) // FIXME: We cannot deal with external projects yet
-      None
+      Nil
     else {
       import ast.Trees._
-      def sourceTreeOfClass(tree: tpd.Tree): Option[SourceTree] = tree match {
+
+      def sourceTreeOfClass(tree: tpd.Tree): Option[SourceNamedTree] = tree match {
         case PackageDef(_, stats) =>
-          val imports = stats.collect { case imp: tpd.Import => imp }
-          stats.flatMap(sourceTreeOfClass(_).map(_.copy(topLevelImports = imports))).headOption
+          stats.flatMap(sourceTreeOfClass).headOption
         case tree: tpd.TypeDef if tree.symbol == sym =>
           val sourceFile = new SourceFile(sym.sourceFile, Codec.UTF8)
-          Some(SourceTree(Nil, tree, sourceFile))
-        case _ => None
+          Some(SourceNamedTree(tree, sourceFile))
+        case _ =>
+          None
       }
-      sourceTreeOfClass(sym.treeContaining(id))
+
+      def sourceImports(tree: tpd.Tree, sourceFile: SourceFile): List[SourceImportTree] = tree match {
+        case PackageDef(_, stats) => stats.flatMap(sourceImports(_, sourceFile))
+        case imp: tpd.Import => SourceImportTree(imp, sourceFile) :: Nil
+        case _ => Nil
+      }
+
+      val tree = sym.treeContaining(id)
+      sourceTreeOfClass(tree) match {
+        case Some(namedTree) => namedTree :: sourceImports(tree, namedTree.source)
+        case None => Nil
+      }
     }
   }
 }

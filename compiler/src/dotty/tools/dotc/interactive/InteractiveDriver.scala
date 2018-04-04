@@ -67,14 +67,14 @@ class InteractiveDriver(val settings: List[String]) extends Driver {
     (fromSource ++ fromClassPath).distinct
   }
 
-  private def tree(className: TypeName, id: String)(implicit ctx: Context): Option[SourceTree] = {
+  private def tree(className: TypeName, id: String)(implicit ctx: Context): List[SourceTree] = {
     val clsd = ctx.base.staticRef(className)
     clsd match {
       case clsd: ClassDenotation =>
         clsd.ensureCompleted()
         SourceTree.fromSymbol(clsd.symbol.asClass, id)
       case _ =>
-        None
+        Nil
     }
   }
 
@@ -169,18 +169,19 @@ class InteractiveDriver(val settings: List[String]) extends Driver {
     names.toList
   }
 
-  private def topLevelClassTrees(topTree: Tree, source: SourceFile): List[SourceTree] = {
+  private def topLevelTrees(topTree: Tree, source: SourceFile): List[SourceTree] = {
     val trees = new mutable.ListBuffer[SourceTree]
 
-    def addTrees(topLevelImports: List[Import], tree: Tree): Unit = tree match {
+    def addTrees(tree: Tree): Unit = tree match {
       case PackageDef(_, stats) =>
-        val imports = stats.collect { case imp: Import => imp }
-        stats.foreach(addTrees(imports, _))
+        stats.foreach(addTrees)
+      case imp: Import =>
+        trees += SourceImportTree(imp, source)
       case tree: TypeDef =>
-        trees += SourceTree(topLevelImports, tree, source)
+        trees += SourceNamedTree(tree, source)
       case _ =>
     }
-    addTrees(Nil, topTree)
+    addTrees(topTree)
 
     trees.toList
   }
@@ -244,7 +245,7 @@ class InteractiveDriver(val settings: List[String]) extends Driver {
       val unit = ctx.run.units.head
       val t = unit.tpdTree
       cleanup(t)
-      myOpenedTrees(uri) = topLevelClassTrees(t, source)
+      myOpenedTrees(uri) = topLevelTrees(t, source)
       myCompilationUnits(uri) = unit
 
       reporter.removeBufferedMessages
