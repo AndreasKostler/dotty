@@ -43,4 +43,16 @@ class DefinitionTest {
     ).definition(m3 to m4, List(m1 to m2))
   }
 
+  @Test def goToDefinitionImport: Unit = {
+    withSources(
+      code"""package a
+             class ${m1}Foo${m2}""",
+      code"""package b
+             import a.${m3}Foo${m4}
+             class C extends ${m5}Foo${m6}"""
+    ).definition(m1 to m2, List(m1 to m2))
+     .definition(m3 to m4, List(m1 to m2))
+     .definition(m5 to m6, List(m1 to m2))
+  }
+
 }
