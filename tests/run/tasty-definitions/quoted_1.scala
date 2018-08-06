@@ -6,7 +6,7 @@ import scala.tasty.util.TreeTraverser
 object Macros {
 
   transparent def testDefinitions(): Unit =
-    ~testDefinitionsImpl(TopLevelSplice.tastyContext) // FIXME infer TopLevelSplice.tastyContext within top level ~
+    ~testDefinitionsImpl
 
   def testDefinitionsImpl(implicit tasty: Tasty): Expr[Unit] = {
     import tasty._
