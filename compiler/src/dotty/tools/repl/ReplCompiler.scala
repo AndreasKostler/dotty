@@ -14,6 +14,7 @@ import dotty.tools.dotc.core.Phases.Phase
 import dotty.tools.dotc.core.StdNames._
 import dotty.tools.dotc.core.Symbols._
 import dotty.tools.dotc.reporting.diagnostic.messages
+import dotty.tools.dotc.transform.PostTyper
 import dotty.tools.dotc.typer.{FrontEnd, ImportInfo}
 import dotty.tools.dotc.util.Positions._
 import dotty.tools.dotc.util.SourceFile
@@ -26,39 +27,43 @@ import scala.collection.mutable
 /** This subclass of `Compiler` replaces the appropriate phases in order to
  *  facilitate the REPL
  *
- *  Specifically it replaces the front end with `REPLFrontEnd`, and adds a
- *  custom subclass of `GenBCode`. The custom `GenBCode`, `REPLGenBCode`, works
- *  in conjunction with a specialized class loader in order to load virtual
- *  classfiles.
+ *  Specifically it replaces the front end with `REPLFrontEnd`.
  */
 class ReplCompiler extends Compiler {
-  override protected def frontendPhases: List[List[Phase]] =
-    Phases.replace(classOf[FrontEnd], _ => new REPLFrontEnd :: Nil, super.frontendPhases)
 
-  def newRun(initCtx: Context, objectIndex: Int) = new Run(this, initCtx) {
-    override protected[this] def rootContext(implicit ctx: Context) =
-      addMagicImports(super.rootContext)
+  override protected def frontendPhases: List[List[Phase]] = List(
+    List(new REPLFrontEnd),
+    List(new CollectTopLevelImports),
+    List(new PostTyper)
+  )
 
-    private def addMagicImports(initCtx: Context): Context = {
-      def addImport(path: TermName)(implicit ctx: Context) = {
-        val importInfo = ImportInfo.rootImport { () =>
-          ctx.requiredModuleRef(path)
-        }
-        ctx.fresh.setNewScope.setImportInfo(importInfo)
-      }
+  def newRunContext(initCtx: Context, state: State): Context = {
+    def addUserDefinedImport(imp: tpd.Import)(implicit ctx: Context) =
+      ctx.importContext(imp, imp.symbol)
 
-      (1 to objectIndex)
-        .foldLeft(initCtx) { (ictx, i) =>
-          addImport(nme.EMPTY_PACKAGE ++ "." ++ objectNames(i))(ictx)
-        }
+    def importModule(path: TermName)(implicit ctx: Context) = {
+      val importInfo = ImportInfo.rootImport(() =>
+        ctx.requiredModuleRef(path))
+      ctx.fresh.setNewScope.setImportInfo(importInfo)
+    }
+
+    val run = newRun(initCtx.fresh.setReporter(newStoreReporter))
+    (1 to state.objectIndex).foldLeft(run.runContext) { (ctx, i) =>
+      // we first import the wrapper object i
+      val path = nme.EMPTY_PACKAGE ++ "." ++ objectNames(i)
+      val ctx0 = importModule(path)(ctx)
+      // then its user defined imports
+      val imports = state.imports.getOrElse(i, Nil)
+      if (imports.isEmpty) ctx0
+      else imports.foldLeft(ctx0.fresh.setNewScope)((ctx, imp) =>
+        addUserDefinedImport(imp)(ctx))
     }
   }
 
   private[this] val objectNames = mutable.Map.empty[Int, TermName]
   private def objectName(state: State) =
-    objectNames.getOrElseUpdate(state.objectIndex, {
-      (str.REPL_SESSION_LINE + state.objectIndex).toTermName
-    })
+    objectNames.getOrElseUpdate(state.objectIndex,
+      (str.REPL_SESSION_LINE + state.objectIndex).toTermName)
 
   private case class Definitions(stats: List[untpd.Tree], state: State)
 
@@ -86,7 +91,7 @@ class ReplCompiler extends Compiler {
     }
 
     Definitions(
-      state.imports ++ defs,
+      defs,
       state.copy(
         objectIndex = state.objectIndex + (if (defs.isEmpty) 0 else 1),
         valIndex = valIdx
@@ -130,7 +135,7 @@ class ReplCompiler extends Compiler {
 
   private def runCompilationUnit(unit: CompilationUnit, state: State): Result[(CompilationUnit, State)] = {
     val ctx = state.context
-    ctx.run.compileUnits(unit :: Nil)
+    ctx.run.compileUnits(unit :: Nil, ctx)
 
     if (!ctx.reporter.hasErrors) (unit, state).result
     else ctx.reporter.removeBufferedMessages(ctx).errors
@@ -158,19 +163,18 @@ class ReplCompiler extends Compiler {
   def docOf(expr: String)(implicit state: State): Result[String] = {
     implicit val ctx: Context = state.context
 
-    /**
-     * Extract the "selected" symbol from `tree`.
+    /** Extract the "selected" symbol from `tree`.
      *
-     * Because the REPL typechecks an expression, special syntax is needed to get the documentation
-     * of certain symbols:
+     *  Because the REPL typechecks an expression, special syntax is needed to get the documentation
+     *  of certain symbols:
      *
-     * - To select the documentation of classes, the user needs to pass a call to the class' constructor
-     *   (e.g. `new Foo` to select `class Foo`)
-     * - When methods are overloaded, the user needs to enter a lambda to specify which functions he wants
-     *   (e.g. `foo(_: Int)` to select `def foo(x: Int)` instead of `def foo(x: String)`
+     *  - To select the documentation of classes, the user needs to pass a call to the class' constructor
+     *    (e.g. `new Foo` to select `class Foo`)
+     *  - When methods are overloaded, the user needs to enter a lambda to specify which functions he wants
+     *    (e.g. `foo(_: Int)` to select `def foo(x: Int)` instead of `def foo(x: String)`
      *
-     * This function returns the right symbol for the received expression, and all the symbols that are
-     * overridden.
+     *  This function returns the right symbol for the received expression, and all the symbols that are
+     *  overridden.
      */
     def extractSymbols(tree: tpd.Tree): Iterator[Symbol] = {
       val sym = tree match {
@@ -210,7 +214,7 @@ class ReplCompiler extends Compiler {
         import untpd._
 
         val valdef = ValDef("expr".toTermName, TypeTree(), Block(trees, unitLiteral))
-        val tmpl = Template(emptyConstructor, Nil, EmptyValDef, state.imports :+ valdef)
+        val tmpl = Template(emptyConstructor, Nil, EmptyValDef, List(valdef))
         val wrapper = TypeDef("$wrapper".toTypeName, tmpl)
           .withMods(Modifiers(Final))
           .withPos(Position(0, expr.length))
@@ -261,9 +265,8 @@ class ReplCompiler extends Compiler {
 
       if (errorsAllowed || !ctx.reporter.hasErrors)
         unwrapped(unit.tpdTree, src)
-      else {
+      else
         ctx.reporter.removeBufferedMessages.errors
-      }
     }
   }
 }
