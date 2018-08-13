@@ -689,6 +689,9 @@ class Definitions {
   lazy val TastyTopLevelSpliceModule = ctx.requiredModule("scala.tasty.TopLevelSplice")
     lazy val TastyTopLevelSplice_tastyContext = TastyTopLevelSpliceModule.requiredMethod("tastyContext")
 
+  lazy val RefinedScrutineeType: TypeRef       = ctx.requiredClassRef("scala.RefinedScrutinee")
+  def RefinedScrutineeClass(implicit ctx: Context) = RefinedScrutineeType.symbol.asClass
+
   lazy val EqType = ctx.requiredClassRef("scala.Eq")
   def EqClass(implicit ctx: Context) = EqType.symbol.asClass
   def EqModule(implicit ctx: Context) = EqClass.companionModule
