@@ -2,8 +2,11 @@ package dotty.tools.sbtplugin
 
 import sbt._
 import sbt.Keys._
+import sbt.librarymanagement.DependencyResolution
+import sbt.internal.inc.ScalaInstance
 // import sbt.inc.{ ClassfileManager, IncOptions }
 import xsbti.compile._
+import java.net.URLClassLoader
 import java.util.Optional
 
 object DottyPlugin extends AutoPlugin {
@@ -151,6 +154,8 @@ object DottyPlugin extends AutoPlugin {
           scalaOrganization.value
       },
 
+      scalacOptions in (Compile, doc) ++= Seq("-project", name.value),
+
       incOptions in Compile := {
         val inc = (incOptions in Compile).value
         if (isDotty.value)
@@ -174,7 +179,42 @@ object DottyPlugin extends AutoPlugin {
           scalaVersion.value.split("\\.").take(2).mkString(".")
         else
           scalaBinaryVersion.value
-      }
+      },
+
+      scalaInstance := Def.taskDyn {
+        val si = scalaInstance.value
+        if (isDotty.value) {
+          Def.task {
+            val dottydocArtifacts = fetchArtifactsOf("dotty-doc").value
+            val includeArtifact = (f: File) => f.getName.endsWith(".jar")
+            val dottydocJars = dottydocArtifacts.filter(includeArtifact).toArray
+            val allJars = (si.allJars ++ dottydocJars).distinct
+            val loader = new URLClassLoader(Path.toURLs(dottydocJars), si.loader)
+            new ScalaInstance(si.version, loader, si.loaderLibraryOnly, si.libraryJar, si.compilerJar, allJars, si.explicitActual)
+          }
+        } else {
+          Def.task { si }
+        }
+      }.value
     )
+  }
+
+  private def fetchArtifactsOf(moduleName: String) = Def.task {
+    val dependencyResolution = Keys.dependencyResolution.value
+    val log = streams.value.log
+    val scalaInfo = scalaModuleInfo.value
+    val updateConfiguration = Keys.updateConfiguration.value
+    val warningConfiguration = (unresolvedWarningConfiguration in update).value
+
+    val moduleID = (scalaOrganization.value %% moduleName % scalaVersion.value).cross(CrossVersion.binary)
+    val descriptor = dependencyResolution.wrapDependencyInModule(moduleID, scalaInfo)
+
+    dependencyResolution.update(descriptor, updateConfiguration, warningConfiguration, log) match {
+      case Left(uw) =>
+        throw new MessageOnlyException(
+          s"Couldn't retrieve `${scalaOrganization.value} %% $moduleName %% {scalaVersion.value}`.")
+      case Right(report) =>
+        report.allFiles
+    }
   }
 }
