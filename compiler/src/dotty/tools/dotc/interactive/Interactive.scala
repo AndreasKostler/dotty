@@ -329,7 +329,7 @@ object Interactive {
 
   def contextOfPath(path: List[Tree])(implicit ctx: Context): Context = path match {
     case Nil | _ :: Nil =>
-      ctx.run.runContext.fresh.setCompilationUnit(ctx.compilationUnit)
+      ctx.fresh.setCompilationUnit(ctx.compilationUnit)
     case nested :: encl :: rest =>
       import typer.Typer._
       val outer = contextOfPath(encl :: rest)
