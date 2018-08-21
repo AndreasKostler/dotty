@@ -146,8 +146,8 @@ class ReplDriver(settings: Array[String],
 
   /** Extract possible completions at the index of `cursor` in `expr` */
   protected[this] final def completions(cursor: Int, expr: String, state0: State): List[Candidate] = {
-    def makeCandidate(completion: Symbol)(implicit ctx: Context) = {
-      val displ = completion.name.toString
+    def makeCandidate(name: Name)(implicit ctx: Context) = {
+      val displ = name.toString
       new Candidate(
         /* value    = */ displ,
         /* displ    = */ displ, // displayed value
@@ -168,7 +168,7 @@ class ReplDriver(settings: Array[String],
         implicit val ctx = state.context.fresh.setCompilationUnit(unit)
         val srcPos = SourcePosition(file, Position(cursor))
         val (_, completions) = Interactive.completions(srcPos)
-        completions.map(makeCandidate)
+        completions.map(c => makeCandidate(c._2))
       }
       .getOrElse(Nil)
   }

@@ -234,7 +234,7 @@ class DottyLanguageServer extends LanguageServer
     }
 
     JEither.forRight(new CompletionList(
-      /*isIncomplete = */ false, items.map(completionItem).asJava))
+      /*isIncomplete = */ false, items.map(completionItem.tupled).asJava))
   }
 
   /** If cursor is on a reference, show its definition and all overriding definitions in
@@ -441,7 +441,7 @@ object DottyLanguageServer {
     }
 
   /** Create an lsp4j.CompletionItem from a Symbol */
-  def completionItem(sym: Symbol)(implicit ctx: Context): lsp4j.CompletionItem = {
+  def completionItem(sym: Symbol, name: Name)(implicit ctx: Context): lsp4j.CompletionItem = {
     def completionItemKind(sym: Symbol)(implicit ctx: Context): lsp4j.CompletionItemKind = {
       import lsp4j.{CompletionItemKind => CIK}
 
@@ -459,7 +459,7 @@ object DottyLanguageServer {
         CIK.Field
     }
 
-    val label = sym.name.show
+    val label = name.show
     val item = new lsp4j.CompletionItem(label)
     item.setDetail(sym.info.widenTermRefExpr.show)
     item.setKind(completionItemKind(sym))

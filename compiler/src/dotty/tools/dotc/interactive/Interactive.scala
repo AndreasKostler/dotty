@@ -96,15 +96,15 @@ object Interactive {
 
   /** Get possible completions from tree at `pos`
    *
-   *  @return offset and list of symbols for possible completions
+   *  @return offset and list of (symbol, name in scope) for possible completions
    */
-  def completions(pos: SourcePosition)(implicit ctx: Context): (Int, List[Symbol]) = {
+  def completions(pos: SourcePosition)(implicit ctx: Context): (Int, List[(Symbol, Name)]) = {
     val path = pathTo(ctx.compilationUnit.tpdTree, pos.pos)
     computeCompletions(pos, path)(contextOfPath(path))
   }
 
-  private def computeCompletions(pos: SourcePosition, path: List[Tree])(implicit ctx: Context): (Int, List[Symbol]) = {
-    val completions = Scopes.newScope.openForMutations
+  private def computeCompletions(pos: SourcePosition, path: List[Tree])(implicit ctx: Context): (Int, List[(Symbol, Name)]) = {
+    val completions = new RenameAwareScope
 
     val (completionPos, prefix, termOnly, typeOnly) = path match {
       case (ref: RefTree) :: _ =>
@@ -128,53 +128,53 @@ object Interactive {
      *  as completion results. However, if a user explicitly writes all '$' characters in an
      *  identifier, we should complete the rest.
      */
-    def include(sym: Symbol) =
-      sym.name.startsWith(prefix) &&
-      !sym.name.toString.drop(prefix.length).contains('$') &&
+    def include(sym: Symbol, nameInScope: Name) =
+      nameInScope.startsWith(prefix) &&
+      !nameInScope.toString.drop(prefix.length).contains('$') &&
       (!termOnly || sym.isTerm) &&
       (!typeOnly || sym.isType)
 
-    def enter(sym: Symbol) =
-      if (include(sym)) completions.enter(sym)
+    def enter(sym: Symbol, nameInScope: Name) =
+      if (include(sym, nameInScope)) completions.enter(sym, nameInScope)
 
     def add(sym: Symbol) =
-      if (sym.exists && !completions.lookup(sym.name).exists) enter(sym)
+      if (sym.exists && !completions.lookup(sym.name).exists) enter(sym, sym.name)
 
-    def addMember(site: Type, name: Name) =
-      if (!completions.lookup(name).exists)
-        for (alt <- site.member(name).alternatives) enter(alt.symbol)
+    def addMember(site: Type, name: Name, nameInScope: Name) =
+      if (!completions.lookup(nameInScope).exists)
+        for (alt <- site.member(name).alternatives) enter(alt.symbol, nameInScope)
 
     def accessibleMembers(site: Type, superAccess: Boolean = true): Seq[Symbol] = site match {
       case site: NamedType if site.symbol.is(Package) =>
-        site.decls.toList.filter(include) // Don't look inside package members -- it's too expensive.
+        site.decls.toList.filter(sym => include(sym, sym.name)) // Don't look inside package members -- it's too expensive.
       case _ =>
         def appendMemberSyms(name: Name, buf: mutable.Buffer[SingleDenotation]): Unit =
           try buf ++= site.member(name).alternatives
           catch { case ex: TypeError => }
         site.memberDenots(takeAllFilter, appendMemberSyms).collect {
-          case mbr if include(mbr.symbol) => mbr.accessibleFrom(site, superAccess).symbol
+          case mbr if include(mbr.symbol, mbr.symbol.name) => mbr.accessibleFrom(site, superAccess).symbol
           case _ => NoSymbol
         }.filter(_.exists)
     }
 
     def addAccessibleMembers(site: Type, superAccess: Boolean = true): Unit =
-      for (mbr <- accessibleMembers(site)) addMember(site, mbr.name)
+      for (mbr <- accessibleMembers(site)) addMember(site, mbr.name, mbr.name)
 
     def getImportCompletions(ictx: Context): Unit = {
       implicit val ctx = ictx
       val imp = ctx.importInfo
       if (imp != null) {
-        def addImport(name: TermName) = {
-          addMember(imp.site, name)
-          addMember(imp.site, name.toTypeName)
+        def addImport(original: TermName, nameInScope: TermName) = {
+          addMember(imp.site, original, nameInScope)
+          addMember(imp.site, original.toTypeName, nameInScope.toTypeName)
         }
-        // FIXME: We need to also take renamed items into account for completions,
-        // That means we have to return list of a pairs (Name, Symbol) instead of a list
-        // of symbols from `completions`.!=
-        for (imported <- imp.originals if !imp.excluded.contains(imported)) addImport(imported)
+        imp.reverseMapping.foreachBinding { (nameInScope, original) =>
+          if (original != nameInScope || !imp.excluded.contains(original))
+            addImport(original, nameInScope)
+        }
         if (imp.isWildcardImport)
           for (mbr <- accessibleMembers(imp.site) if !imp.excluded.contains(mbr.name.toTermName))
-            addMember(imp.site, mbr.name)
+            addMember(imp.site, mbr.name, mbr.name)
       }
     }
 
@@ -219,7 +219,7 @@ object Interactive {
       case _  => getScopeCompletions(ctx)
     }
 
-    val completionList = completions.toList
+    val completionList = completions.toListWithNames
     interactiv.println(i"completion with pos = $pos, prefix = $prefix, termOnly = $termOnly, typeOnly = $typeOnly = $completionList%, %")
     (completionPos, completionList)
   }
@@ -233,7 +233,7 @@ object Interactive {
         def addMember(name: Name, buf: mutable.Buffer[SingleDenotation]): Unit =
           buf ++= prefix.member(name).altsWith(sym =>
             !exclude(sym) && sym.isAccessibleFrom(prefix)(boundaryCtx))
-          prefix.memberDenots(completionsFilter, addMember).map(_.symbol).toList
+        prefix.memberDenots(completionsFilter, addMember).map(_.symbol).toList
       }
       else Nil
     }
@@ -377,4 +377,24 @@ object Interactive {
   /** The first tree in the path that is a definition. */
   def enclosingDefinitionInPath(path: List[Tree])(implicit ctx: Context): Tree =
     path.find(_.isInstanceOf[DefTree]).getOrElse(EmptyTree)
+
+  /** A scope that tracks renames of the entered symbols.
+   *  Useful for providing completions for renamed symbols
+   *  in the REPL and the IDE.
+   */
+  private class RenameAwareScope extends Scopes.MutableScope {
+    private[this] val renames: mutable.Map[Symbol, Name] = mutable.Map.empty
+
+    /** Enter the symbol `sym` in this scope, recording a potential renaming. */
+    def enter[T <: Symbol](sym: T, name: Name)(implicit ctx: Context): T = {
+      if (name != sym.name) renames += sym -> name
+      newScopeEntry(name, sym)
+      sym
+    }
+
+    /** Lists the symbols in this scope along with the name associated with them. */
+    def toListWithNames(implicit ctx: Context): List[(Symbol, Name)] =
+      toList.map(sym => (sym, renames.get(sym).getOrElse(sym.name)))
+  }
+
 }
